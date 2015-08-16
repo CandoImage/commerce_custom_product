@@ -512,7 +512,7 @@ function commerce_custom_product_form_commerce_cart_add_to_cart_form_alter(&$for
     $use_multi = 0;
     $has_existing_extra_line_items = array();
     $id = 0;
-    $previous_extra_line_items = $form_state['extra_line_items'];
+    $previous_extra_line_items = (isset($form_state['extra_line_items'])) ? $form_state['extra_line_items'] : array();
     $form_state['extra_line_items'] = array();
     foreach ($types as $type) {
       $line_item_count = 0;
