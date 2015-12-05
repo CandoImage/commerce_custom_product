@@ -437,7 +437,7 @@ function commerce_custom_product_commerce_cart_order_refresh($order_wrapper) {
     $line_item_ids[$line_item_id] = $line_item_id;
     // If this line item has a commerce_parent_line_item field and the context
     // data tell us that it actually has a parent analyze it.
-    if (isset($line_item_wrapper->commerce_parent_line_item) && isset($line_item->data['context']['extra_line_item_index'])) {
+    if (isset($line_item_wrapper->commerce_parent_line_item) && isset($line_item->data['context']['commerce_custom_product'])) {
       $parent_line_item_id = $line_item_wrapper->commerce_parent_line_item->raw();
       $extra_line_items[$parent_line_item_id][$i] = $line_item_id;
       if (isset($line_item->data['context']['commerce_custom_product']) && $line_item_wrapper->commerce_parent_line_item->value()) {
@@ -472,7 +472,7 @@ function commerce_custom_product_commerce_cart_order_refresh($order_wrapper) {
     $order->commerce_parent_line_item[LANGUAGE_NONE] = array_values(array_diff_key($order->commerce_line_items[LANGUAGE_NONE], $extra_line_items_to_delete));
   }
 
-  // Now check if there are missing extra line items and if so add them.
+  // Check if there are missing extra line items and if so add them.
   if (!empty($parent_line_items)) {
     foreach ($parent_line_items as $parent_line_item_id => $parent_line_item) {
       $customizing_context = $parent_line_item->data['context']['commerce_custom_product'];
@@ -497,9 +497,9 @@ function commerce_custom_product_commerce_cart_order_refresh($order_wrapper) {
               $line_item_data['context']['show_single_product_attributes'] = !empty($settings['show_single_product_attributes']);
               $line_item_data['context']['use_multi'] = $type['use_multi'];
               $line_item_data['context']['extra_line_item_index'] = $i;
-              $line_item_data['context']['commerce_custom_product'] = $customizing_context + array(
+              $line_item_data['context']['commerce_custom_product'] = array_merge($customizing_context, array(
                 'delta' => $type_delta,
-              );
+              ));
               $line_item = commerce_custom_product_create_extra_line_item($type['target_id'], $parent_line_items[$parent_line_item_id], $order, $quantity, $line_item_data, $product);
 
               // If this is a new line item we need to add it to the order too.
@@ -836,11 +836,7 @@ function commerce_custom_product_add_to_cart_form_submit($form, &$form_state) {
   // Add any additional line items.
   if (!empty($form_state['extra_line_items'])) {
     $product_id = $form_state['values']['product_id'];
-    $product = commerce_product_load($product_id);
-
     $update_order = FALSE;
-
-    $line_item_types = commerce_line_item_types();
 
     foreach ($form_state['extra_line_items'] as $id => $line_item) {
       // If the product was combined into an existing line item and we are not
@@ -858,7 +854,7 @@ function commerce_custom_product_add_to_cart_form_submit($form, &$form_state) {
       }
       // If it's a new line item create it, otherwise update it.
       if (empty($line_item->line_item_id)) {
-        $line_item = commerce_custom_product_create_extra_line_item($line_item->type, $form_state['line_item'], $order, $form_state['values']['quantity'], $form_state['line_item']->data, $product_id);
+        $line_item = commerce_custom_product_create_extra_line_item($line_item->type, $form_state['line_item'], $order, $form_state['values']['quantity'], $line_item->data, $product_id);
       }
       else {
         // Update quantity.
