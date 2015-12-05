@@ -55,6 +55,18 @@ function commerce_custom_product_field_schema($field) {
           'not null' => FALSE,
           'default' => 0,
         ),
+        'label' => array(
+          'description' => 'The label for the customization field.',
+          'type' => 'varchar',
+          'length' => 255,
+          'not null' => FALSE,
+        ),
+        'description' => array(
+          'description' => 'The description for the customization field.',
+          'type' => 'text',
+          'size' => 'big',
+          'not null' => FALSE,
+        ),
       ),
       'indexes' => array(
         'target_id' => array('target_id'),
@@ -70,4 +82,40 @@ function commerce_custom_product_uninstall() {
   variable_del('commerce_custom_product_customizing_pane_description');
   variable_del('commerce_custom_product_customizing_pane_update_button');
   variable_del('commerce_custom_product_customizing_skip');
+}
+
+/**
+ * Add new columns to the field schema.
+ */
+function commerce_custom_product_update_7000() {
+  $field_schema = commerce_custom_product_field_schema(array('type' => 'commerce_custom_product_line_item_type_reference'));
+  foreach (field_read_fields(array('type' => 'commerce_custom_product_line_item_type_reference'), array('include_inactive' => TRUE)) as $field_name => $field) {
+    $data_table = _field_sql_storage_tablename($field);
+    $revision_table =_field_sql_storage_revision_tablename($field);
+    if (!db_field_exists($data_table, $field['field_name'] . '_label')) {
+      db_add_field($data_table, $field['field_name'] . '_label', $field_schema['columns']['label']);
+    }
+    if (!db_field_exists($data_table, $field['field_name'] . '_description')) {
+      db_add_field($data_table, $field['field_name'] . '_description', $field_schema['columns']['description']);
+    }
+    if (!db_field_exists($revision_table, $field['field_name'] . '_label')) {
+      db_add_field($revision_table, $field['field_name'] . '_label', $field_schema['columns']['label']);
+    }
+    if (!db_field_exists($revision_table, $field['field_name'] . '_description')) {
+      db_add_field($revision_table, $field['field_name'] . '_description', $field_schema['columns']['description']);
+    }
+    // Ensure entity_translation_sync is properly set.
+    $field['settings']['entity_translation_sync'] = array(
+      'target_id',
+      'use_multi',
+    );
+    field_update_field($field);
+    foreach(field_read_instances(array('field_name' => $field['field_name'])) as $instance) {
+      $instance['settings']['entity_translation_sync'] = array(
+        'target_id',
+        'use_multi',
+      );
+      field_update_instance($instance);
+    }
+  }
 }

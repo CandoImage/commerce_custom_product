@@ -262,8 +262,18 @@ function commerce_custom_product_field_info() {
     'commerce_custom_product_line_item_type_reference' => array(
       'label' => t('Line item type reference'),
       'description' => t('This field stores the ID of a related line item type.'),
-      'settings' => array(),
-      'instance_settings' => array(),
+      'settings' => array(
+        'entity_translation_sync' => array(
+          'target_id',
+          'use_multi',
+        ),
+      ),
+      'instance_settings' => array(
+        'entity_translation_sync' => array(
+          'target_id',
+          'use_multi',
+        ),
+      ),
       'default_widget' => 'commerce_custom_product_line_item_type_reference_select',
       'default_formatter' => NULL,
     ),
@@ -274,14 +284,16 @@ function commerce_custom_product_field_info() {
  * Implements hook_field_validate().
  */
 function commerce_custom_product_field_validate($entity_type, $entity, $field, $instance, $langcode, $items, &$errors) {
-  foreach ($items as $delta => $item) {
-    if (!empty($item['target_id'])) {
-      $type = commerce_line_item_type_load($item['target_id']);
-      if (!$type || $type['product']) {
-        $errors[$field['field_name']][$langcode][$delta][] = array(
-          'error' => 'commerce_custom_product_line_item_type_reference_invalid',
-          'message' => t('%name: Invalid line item type referenced.', array('%name' => $instance['label'])),
-        );
+  if ($field['type'] == 'commerce_custom_product_line_item_type_reference') {
+    foreach ($items as $delta => $item) {
+      if (!empty($item['target_id'])) {
+        $type = commerce_line_item_type_load($item['target_id']);
+        if (!$type || $type['product']) {
+          $errors[$field['field_name']][$langcode][$delta][] = array(
+            'error' => 'commerce_custom_product_line_item_type_reference_invalid',
+            'message' => t('%name: Invalid line item type referenced.', array('%name' => $instance['label'])),
+          );
+        }
       }
     }
   }
@@ -310,6 +322,12 @@ function commerce_custom_product_field_widget_info() {
  * Implements hook_field_widget_form().
  */
 function commerce_custom_product_field_widget_form(&$form, &$form_state, $field, $instance, $langcode, $items, $delta, $element) {
+
+  if (isset($form_state['triggering_element']['#field_name']) && isset($form_state['triggering_element']['#langcode']) && isset($form_state['triggering_element']['#delta'])) {
+    if ($form_state['triggering_element']['#field_name'] == $field['field_name'] && $form_state['triggering_element']['#langcode'] == $langcode && $form_state['triggering_element']['#delta'] == $delta) {
+      return FALSE;
+    }
+  }
   // Define the autocomplete textfield for products.
   if ($instance['widget']['type'] == 'commerce_custom_product_line_item_type_reference_select') {
     $line_items_types = array_filter(
@@ -324,19 +342,70 @@ function commerce_custom_product_field_widget_form(&$form, &$form_state, $field,
       $options[$line_items_type['type']] = $line_items_type['name'];
     }
 
-    return $element + array(
+    $element = $element + array(
       'target_id' => array(
         '#type' => 'select',
         '#default_value' => isset($items[$delta]['target_id']) ? $items[$delta]['target_id'] : NULL,
         '#options' => $options,
+        '#description' => ' (' . t('all languages') . ')',
       ),
       'use_multi' => array(
         '#type' => 'checkbox',
         '#title' => t('One line item per product item'),
         '#default_value' => isset($items[$delta]['use_multi']) ? $items[$delta]['use_multi'] : 0,
+        '#description' => '(' . t('all languages') . ')',
+      ),
+      'label' => array(
+        '#type' => 'textfield',
+        '#title' => t('Customization label'),
+        '#default_value' => isset($items[$delta]['label']) ? $items[$delta]['label'] : '',
+      ),
+      'description' => array(
+        '#type' => 'textarea',
+        '#title' => t('Customization description'),
+        '#default_value' => isset($items[$delta]['description']) ? $items[$delta]['description'] : '',
       ),
     );
+
+    if ($field['cardinality'] == FIELD_CARDINALITY_UNLIMITED && isset($items[$delta])) {
+      $element['remove_button'] = array(
+        '#type' => 'button',
+        '#value' => t('Remove'),
+        '#name' => drupal_html_class('remove-button-' . $field['field_name'] . '-' . $langcode . '-' . $delta),
+        '#weight' => 10,
+        '#submit' => 'commerce_custom_product_field_widget_form_ajax',
+        '#ajax' => array(
+          'callback' => 'commerce_custom_product_field_widget_form_ajax',
+        ),
+        '#limit_validation_errors' => array(),
+        '#field_name' => $field['field_name'],
+        '#langcode' => $langcode,
+        '#delta' => $delta,
+        '#remove_button' => TRUE,
+      );
+    }
+    return $element;
   }
+}
+
+/**
+ * Ajax handler for the field widget form.
+ */
+function commerce_custom_product_field_widget_form_ajax($form, &$form_state) {
+    $parents = $form_state['triggering_element']['#array_parents'];
+    array_pop($parents);
+    array_pop($parents);
+    array_pop($parents);
+    $element = drupal_array_get_nested_value($form, $parents);
+
+    $wrapper = '.form-wrapper.' . drupal_html_class('field-name-' . $form_state['triggering_element']['#field_name']);
+
+    return array(
+      '#type' => 'ajax',
+      '#commands' => array(
+        ajax_command_replace($wrapper, render($element)),
+      ),
+    );
 }
 
 /**
@@ -347,38 +416,108 @@ function commerce_custom_product_field_is_empty($item, $field) {
 }
 
 /**
- * Implements hook_commerce_order_presave().
+ * Implements hook_commerce_cart_order_refresh().
+ *
+ * Takes care of managing the extra items on an order.
+ * - Remove orphaned extra line items.
+ * - Remove use_multi extra line items that are to many.
+ * - Adds missing extra line items according to the parent line item quantity.
  */
-function commerce_custom_product_commerce_order_presave($order) {
+function commerce_custom_product_commerce_cart_order_refresh($order_wrapper) {
+  $order = $order_wrapper->value();
   // Collect all line items. And group extra line items on their parent.
-  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
   $line_item_ids = array();
   $extra_line_items = array();
+  $extra_line_items_to_delete = array();
+  $extra_line_items_count = array();
+  $parent_line_items = array();
   foreach ($order_wrapper->commerce_line_items as $i => $line_item_wrapper) {
+    $line_item = $line_item_wrapper->value();
     $line_item_id = $line_item_wrapper->getIdentifier();
     $line_item_ids[$line_item_id] = $line_item_id;
     // If this line item has a commerce_parent_line_item field and the context
-    // data tell us that it actually has a parent queue it for deletion.
-    if (isset($line_item_wrapper->commerce_parent_line_item) && isset($line_item_wrapper->value()->data['context']['extra_line_item_index'])) {
-      $extra_line_items[$line_item_wrapper->commerce_parent_line_item->raw()][$i] = $line_item_id;
+    // data tell us that it actually has a parent analyze it.
+    if (isset($line_item_wrapper->commerce_parent_line_item) && isset($line_item->data['context']['extra_line_item_index'])) {
+      $parent_line_item_id = $line_item_wrapper->commerce_parent_line_item->raw();
+      $extra_line_items[$parent_line_item_id][$i] = $line_item_id;
+      if (isset($line_item->data['context']['commerce_custom_product']) && $line_item_wrapper->commerce_parent_line_item->value()) {
+        $customizing_type_delta = $line_item->data['context']['commerce_custom_product']['delta'];
+        if (!isset($extra_line_items_count[$parent_line_item_id][$customizing_type_delta])) {
+          $extra_line_items_count[$parent_line_item_id][$customizing_type_delta] = 0;
+        }
+        $extra_line_items_count[$parent_line_item_id][$customizing_type_delta]++;
+
+        // Ensure use_multi line items match the parent line item count.
+        if ($line_item_wrapper->commerce_parent_line_item->quantity->value() < $extra_line_items_count[$parent_line_item_id][$customizing_type_delta]) {
+          $extra_line_items_to_delete[] = $line_item_id;
+          $order_wrapper->commerce_line_items->offsetUnset($i);
+        }
+      }
+    }
+    elseif (isset($line_item->data['context']['commerce_custom_product'])) {
+      $parent_line_items[$line_item_id] = $line_item;
     }
   }
   // Now filter all extra line items whose parent is gone.
-  $extra_line_items_to_delete = array();
   foreach (array_diff_key($extra_line_items, $line_item_ids) as $extra_line_items) {
     $extra_line_items_to_delete += $extra_line_items;
   }
-  // Delete orphaned line items and remove references from order.
+
+  // Delete orphaned extra line items and remove references from order.
   if (!empty($extra_line_items_to_delete)) {
     commerce_line_item_delete_multiple($extra_line_items_to_delete);
+
     // Now remove the line item references. As we store the index in the field
     // above we can use array_diff_key() again.
     $order->commerce_parent_line_item[LANGUAGE_NONE] = array_values(array_diff_key($order->commerce_line_items[LANGUAGE_NONE], $extra_line_items_to_delete));
+  }
+
+  // Now check if there are missing extra line items and if so add them.
+  if (!empty($parent_line_items)) {
+    foreach ($parent_line_items as $parent_line_item_id => $parent_line_item) {
+      $customizing_context = $parent_line_item->data['context']['commerce_custom_product'];
+      $settings_entity = entity_load_single($customizing_context['settings_entity']['entity_type'], $customizing_context['settings_entity']['id']);
+      // If customizing types could be fetched iterate over all of them.
+      if ($customizing_types = field_get_items($customizing_context['settings_entity']['entity_type'], $settings_entity, $customizing_context['settings']['extra_line_items_field'])) {
+        foreach ($customizing_types as $type_delta => $type) {
+          // If this customizing type us related to the parent line item
+          // quantity set it accordingly - otherwise just use 1 as quantity.
+          $quantity = (!empty($type['use_multi'])) ? $parent_line_item->quantity : 1;
+          // If there aren't enough extra line items iterate over all missing
+          // ones and add them.
+          if ($extra_line_items_count[$parent_line_item_id][$type_delta] < $quantity ) {
+
+            for ($i = $extra_line_items_count[$parent_line_item_id][$type_delta]; $i < $quantity; $i++) {
+              $product_ids = commerce_cart_add_to_cart_form_product_ids($parent_line_item);
+              $products = commerce_product_load_multiple($product_ids);
+              $product = commerce_product_reference_default_product($products);
+              // Build the line item context data.
+              $line_item_data['context']['product_ids'] = array_keys($products);
+              $line_item_data['context']['add_to_cart_combine'] = !empty($settings['combine']);
+              $line_item_data['context']['show_single_product_attributes'] = !empty($settings['show_single_product_attributes']);
+              $line_item_data['context']['use_multi'] = $type['use_multi'];
+              $line_item_data['context']['extra_line_item_index'] = $i;
+              $line_item_data['context']['commerce_custom_product'] = $customizing_context + array(
+                'delta' => $type_delta,
+              );
+              $line_item = commerce_custom_product_create_extra_line_item($type['target_id'], $parent_line_items[$parent_line_item_id], $order, $quantity, $line_item_data, $product);
+
+              // If this is a new line item we need to add it to the order too.
+              if (commerce_line_item_save($line_item) == SAVED_NEW) {
+                $order_wrapper->commerce_line_items[] = $line_item;
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 
 /**
  * Returns a list of existing extra line items in an order.
+ *
+ * Takes care to bundle the fields of the same type delta.
  *
  * @param object $order
  *   The commerce order to check for extra line items.
@@ -396,17 +535,46 @@ function commerce_custom_product_order_get_existing_extra_line_items($order = NU
   }
   $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
   $extra_line_items = array();
+  // Collect all the extra line items and group them by parent line item and
+  // type delta.
   /** @var EntityDrupalWrapper $line_item */
   foreach ($order_wrapper->commerce_line_items as $line_item) {
     if (isset($line_item->commerce_parent_line_item) && !is_null($line_item->commerce_parent_line_item->value())) {
+      // Prepare array structure.
       if (!isset($extra_line_items[$line_item->commerce_parent_line_item->raw()])) {
         $extra_line_items[$line_item->commerce_parent_line_item->raw()] = array(
           'parent_line_item' => $line_item->commerce_parent_line_item->value(),
           'extra_line_items' => array(),
         );
       }
-      $extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][] = $line_item->value();
+      $line_item_raw = $line_item->value();
+      $type_delta = (isset($line_item_raw->data['context']['commerce_custom_product']['delta'])) ? $line_item_raw->data['context']['commerce_custom_product']['delta'] : 0;
+      // Prepare array structure.
+      if (!isset($extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][$type_delta])) {
+        $extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][$type_delta] = array();
+      }
+      // Shortcut to keep the code somewhat readable below.
+      $type_delta_line_items = &$extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][$type_delta];
+
+      // Try to use extra_line_item_index to order extra line items.
+      if (isset($line_item_raw->data['context']['extra_line_item_index']) && !isset($type_delta_line_items[$line_item_raw->data['context']['extra_line_item_index']])) {
+        $type_delta_line_items[$line_item_raw->data['context']['extra_line_item_index']] = $line_item_raw;
+      }
+      else {
+        $type_delta_line_items[] = $line_item_raw;
+      }
     }
+  }
+  // Now do all the sorting for the found extra line items.
+  foreach ($extra_line_items as $parent_line_item_id => $extra_line_item_data) {
+    $parent_line_item_extra_line_items = array();
+    ksort($extra_line_item_data['extra_line_items']);
+    foreach ($extra_line_item_data['extra_line_items'] as $type_delta => $type_extra_line_items) {
+      ksort($type_extra_line_items);
+      $parent_line_item_extra_line_items = array_merge($parent_line_item_extra_line_items, array_values($type_extra_line_items));
+    }
+    // Set the sorted and reduced array as result.
+    $extra_line_items[$parent_line_item_id]['extra_line_items'] = $parent_line_item_extra_line_items;
   }
   return $extra_line_items;
 }
@@ -475,6 +643,13 @@ function commerce_custom_product_form_commerce_cart_add_to_cart_form_alter(&$for
   // Fetch the settings for the customization form.
   $customization_settings = commerce_custom_product_get_field_customization_settings($view_mode, $form_state['context']['entity_type'], $entity->{$bundle_key});
 
+  // Add the customization settings to the context of the related product line
+  // item. Used to ensure the consistency of the extra line items.
+  $form_state['line_item']->data['context']['commerce_custom_product'] = array(
+    'settings_entity' => array('entity_type' => $form_state['context']['entity_type']) + array_combine(array('id', 'vid', 'bundle'), entity_extract_ids($form_state['context']['entity_type'], $entity)),
+    'settings' => $customization_settings,
+  );
+
   // If configuration field was found and there are values on it add stuff to
   // the form.
   if ($customization_settings['extra_line_items_field'] && $types = field_get_items($form_state['context']['entity_type'], $entity, $customization_settings['extra_line_items_field'])) {
@@ -509,19 +684,18 @@ function commerce_custom_product_form_commerce_cart_add_to_cart_form_alter(&$for
       }
     }
 
-    $use_multi = 0;
+    $uses_multi = FALSE;
     $has_existing_extra_line_items = array();
     $id = 0;
     $previous_extra_line_items = (isset($form_state['extra_line_items'])) ? $form_state['extra_line_items'] : array();
     $form_state['extra_line_items'] = array();
-    foreach ($types as $type) {
+    foreach ($types as $delta => $type) {
       $line_item_count = 0;
-      // Reset the count for each type.
-      $use_multi = (int) $type['use_multi'];
+      $uses_multi = $uses_multi || $type['use_multi'];
       do {
         // Try to find the corresponding line item in old form_state
         foreach ($previous_extra_line_items as $extra_line_item) {
-          if (isset($extra_line_item->data['context']['use_multi']) && $extra_line_item->data['context']['use_multi'] == $use_multi && $extra_line_item->type == $type['target_id']) {
+          if (isset($extra_line_item->data['context']['extra_line_item_index']) && $extra_line_item->data['context']['extra_line_item_index'] == $id && $extra_line_item->type == $type['target_id']) {
             $form_state['extra_line_items'][$id] = $extra_line_item;
             $line_item = $extra_line_item;
             break;
@@ -533,7 +707,7 @@ function commerce_custom_product_form_commerce_cart_add_to_cart_form_alter(&$for
           // If this isn't quantity based try to detect existing line item.
           if (empty($type['use_multi']) && isset($existing_extra_line_items)) {
             foreach ($existing_extra_line_items as $extra_line_item) {
-              if (isset($extra_line_item->data['context']['use_multi']) && $extra_line_item->data['context']['use_multi'] == $use_multi && $extra_line_item->type == $type['target_id']) {
+              if (isset($extra_line_item->data['context']['use_multi']) && $extra_line_item->data['context']['use_multi'] == $type['use_multi'] && $extra_line_item->type == $type['target_id']) {
                 $line_item = $extra_line_item;
                 $has_existing_extra_line_items = TRUE;
                 break;
@@ -549,6 +723,9 @@ function commerce_custom_product_form_commerce_cart_add_to_cart_form_alter(&$for
             $line_item->data['context']['use_multi'] = $type['use_multi'];
             $line_item->data['context']['extra_line_item_index'] = $id;
           }
+          $line_item->data['context']['commerce_custom_product'] = $form_state['line_item']->data['context']['commerce_custom_product'] + array(
+            'delta' => $delta,
+          );
           $form_state['extra_line_items'][$id] = $line_item;
         }
 
@@ -559,20 +736,23 @@ function commerce_custom_product_form_commerce_cart_add_to_cart_form_alter(&$for
         }
         $id++;
         $line_item_count++;
-        $use_multi += (int) $type['use_multi'];
         // TODO - We might need to read quantity from a different source.
       } while ($type['use_multi'] && $line_item_count < $form['quantity']['#default_value']);
     }
 
     // If this is an existing line item that can be updated adjust some of the
     // form elements.
-    if (!$use_multi && $has_existing_extra_line_items && !$customization_settings['skip_customization_on_add_to_cart']) {
-      $form['submit']['#value'] = t('Upate Customization');
+    if ($has_existing_extra_line_items && !$customization_settings['skip_customization_on_add_to_cart']) {
       $form['submit']['#name'] = 'update';
       $form_state['line_item']->line_item_id = $parent_line_item->line_item_id;
-      $form['quantity']['#value'] = $parent_line_item->quantity;
-      if ($form['quantity']['#datatype'] == 'integer') {
-        $form['quantity']['#value'] = (int) $form['quantity']['#value'];
+
+      // A full update is only possible if this hasn't multi items.
+      if (!$uses_multi) {
+        $form['submit']['#value'] = t('Upate Customization');
+        $form['quantity']['#value'] = $parent_line_item->quantity;
+        if ($form['quantity']['#datatype'] == 'integer') {
+          $form['quantity']['#value'] = (int) $form['quantity']['#value'];
+        }
       }
     }
 
@@ -628,6 +808,13 @@ function commerce_custom_product_add_to_cart_form_submit($form, &$form_state) {
   }
   $is_update = $form_state['triggering_element']['#name'] == 'update';
 
+  // If this is an update of an existing line item increase the quantity.
+  if (!empty($form_state['line_item']->line_item_id) && $is_update) {
+    $parent_line_item = commerce_line_item_load($form_state['line_item']->line_item_id);
+    $parent_line_item->quantity += $form_state['values']['quantity'];
+    commerce_line_item_save($parent_line_item);
+  }
+
   // Use default submit handler to add product line item.
   commerce_cart_add_to_cart_form_submit($form, $form_state);
   // Ensure the order wrapper is updated - the submit above seems to kill the
@@ -671,31 +858,7 @@ function commerce_custom_product_add_to_cart_form_submit($form, &$form_state) {
       }
       // If it's a new line item create it, otherwise update it.
       if (empty($line_item->line_item_id)) {
-        // Use different approach to create product vs non-product line items.
-        if (!empty($line_item_types[$line_item->type]['product'])) {
-          $line_item = commerce_product_line_item_new($product, $form_state['values']['quantity'], 0, $form_state['line_item']->data, $form_state['line_item']->type);
-          $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
-        }
-        else {
-          // Create the new product line item of the same type.
-          $line_item = entity_create('commerce_line_item', array(
-            'type' => $line_item->type,
-            'order_id' => $order->order_id,
-            'data' => $line_item->data,
-          ));
-          $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
-          // Ensure standard field values are properly set.
-          if (isset($line_item_wrapper->commerce_unit_price)) {
-            // Total is set when saving.
-            $line_item_wrapper->commerce_unit_price = commerce_price_wrapper_value($line_item_wrapper, 'commerce_unit_price', TRUE);
-          }
-          if (isset($line_item_wrapper->commerce_product)) {
-            $line_item_wrapper->commerce_product = $product_id;
-          }
-        }
-
-        // Maintain back-reference to the original product line item.
-        $line_item_wrapper->commerce_parent_line_item = $form_state['line_item']->line_item_id;
+        $line_item = commerce_custom_product_create_extra_line_item($line_item->type, $form_state['line_item'], $order, $form_state['values']['quantity'], $form_state['line_item']->data, $product_id);
       }
       else {
         // Update quantity.
@@ -736,6 +899,57 @@ function commerce_custom_product_add_to_cart_form_submit($form, &$form_state) {
       $order_wrapper->save();
     }
   }
+}
+
+/**
+ * Function to create extra line item object.
+ *
+ * Doesn't save the newly create line item object!
+ *
+ * @param string $line_item_type
+ *   The line item type to create.
+ * @param int $parent_line_item
+ *   The id of the parent line item
+ * @param object $order
+ *   The commerce order this line item will belong to.
+ * @param int $quantity
+ *   The quantity value for the line item.
+ * @param array $data
+ *   The additional data for the line item - should contain the context
+ *   information of the line item.
+ * @param int $product_id
+ *   The product id of the product related to this line item.
+ *
+ * @return object
+ */
+function commerce_custom_product_create_extra_line_item($line_item_type, $parent_line_item, $order, $quantity, $data, $product_id = NULL) {
+  $line_item_types = commerce_line_item_types();
+  // Use different approach to create product vs non-product line items.
+  if (!empty($line_item_types[$line_item_type]['product'])) {
+    $product = commerce_product_load($product_id);
+    $line_item = commerce_product_line_item_new($product, $quantity, 0, $parent_line_item->data, $parent_line_item->type);
+    $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+  }
+  else {
+    // Create the new product line item of the same type.
+    $line_item = entity_create('commerce_line_item', array(
+      'type' => $line_item_type,
+      'order_id' => $order->order_id,
+      'data' => $data,
+    ));
+    $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+    // Ensure standard field values are properly set.
+    if (isset($line_item_wrapper->commerce_unit_price)) {
+      // Total is set when saving.
+      $line_item_wrapper->commerce_unit_price = commerce_price_wrapper_value($line_item_wrapper, 'commerce_unit_price', TRUE);
+    }
+    if (isset($line_item_wrapper->commerce_product)) {
+      $line_item_wrapper->commerce_product = $product_id;
+    }
+  }
+  // Maintain back-reference to the original product line item.
+  $line_item_wrapper->commerce_parent_line_item = $parent_line_item->line_item_id;
+  return $line_item;
 }
 
 /**

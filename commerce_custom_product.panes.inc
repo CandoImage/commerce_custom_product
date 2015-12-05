@@ -53,9 +53,23 @@ function commerce_custom_product_customizing_pane_checkout_form($form, &$form_st
     $form['extra_line_items'][$parent_line_item_id] = array(
       '#type' => 'fieldset',
       '#title' => $data['parent_line_item']->line_item_label,
-      '#description' => t('Customize %line_item', array('%line_item' => $data['parent_line_item']->line_item_label)),
     );
+
     foreach ($data['extra_line_items'] as $i => $extra_line_item) {
+      if (!$i && isset($extra_line_item->data['context']['commerce_custom_product'])) {
+        $customizing_context = $extra_line_item->data['context']['commerce_custom_product'];
+        $settings_entity = entity_load_single($customizing_context['settings_entity']['entity_type'], $customizing_context['settings_entity']['id']);
+        $customizing_types = field_get_items($customizing_context['settings_entity']['entity_type'], $settings_entity, $customizing_context['settings']['extra_line_items_field']);
+        if (isset($customizing_types[$customizing_context['delta']])) {
+          if (!empty($customizing_types[$customizing_context['delta']]['label'])) {
+            $form['extra_line_items'][$parent_line_item_id]['#title'] .= '<p class="customizing-label">' . check_plain($customizing_types[$customizing_context['delta']]['label']) . '</p>';
+          }
+          if (!empty($customizing_types[$customizing_context['delta']]['description'])) {
+            $form['extra_line_items'][$parent_line_item_id]['#description'] = filter_xss($customizing_types[$customizing_context['delta']]['description']);
+          }
+        }
+      }
+
       $parents = array(
         'extra_line_items',
         $parent_line_item_id,
