@@ -74,11 +74,12 @@ function commerce_custom_product_customizing_pane_checkout_form($form, &$form_st
         'extra_line_items',
         $parent_line_item_id,
         'line_items',
-        $extra_line_item->data['context']['extra_line_item_index'],
         $i,
       );
-      $form['extra_line_items'][$parent_line_item_id]['line_items'][$extra_line_item->data['context']['extra_line_item_index']][$i] = commerce_custom_product_extra_line_item_form_element($extra_line_item, $form_state, $parents);
-      $form['extra_line_items'][$parent_line_item_id]['line_items'][$extra_line_item->data['context']['extra_line_item_index']][$i]['line_item_id'] = array(
+      $extra_line_item_form_element = &$form['extra_line_items'][$parent_line_item_id]['line_items'][$i];
+      $extra_line_item_form_element = commerce_custom_product_extra_line_item_form_element($extra_line_item, $form_state, $parents);
+      $extra_line_item_form_element['#weight'] = $i;
+      $extra_line_item_form_element['line_item_id'] = array(
         '#type' => 'value',
         '#value' => $extra_line_item->line_item_id,
       );
@@ -117,28 +118,26 @@ function commerce_custom_product_customizing_pane_checkout_form_update($form, &$
  */
 function commerce_custom_product_customizing_pane_checkout_form_submit($form, &$form_state, $checkout_pane, $order) {
   foreach ($form_state['values']['extra_line_items'] as $parent_line_item_id => $extra_line_items) {
-    foreach ($extra_line_items['line_items'] as $extra_line_item_index => $line_items) {
-      foreach ($line_items as $i => $line_item_field_values) {
-        $line_item_id = $line_item_field_values['line_item_id'];
-        $line_item_form_element = $form[$checkout_pane['pane_id']]['extra_line_items'][$parent_line_item_id]['line_items'][$extra_line_item_index][$i];
-        // Remove line item field values the user didn't have access to modify.
-        foreach ($line_item_field_values as $field_name => $value) {
-          // Note that we're checking the Commerce Cart settings that we
-          // inserted into this form element array back when we built the form.
-          // This means a module wanting to alter a line item field widget to be
-          // available must update both its form element's #access value and the
-          // field_access value of the #commerce_cart_settings array.
-          if (empty($line_item_form_element[$field_name]['#commerce_cart_settings']['field_access'])) {
-            unset($line_item_field_values[$field_name]);
-          }
+    foreach ($extra_line_items['line_items'] as  $i => $line_item_field_values) {
+      $line_item_id = $line_item_field_values['line_item_id'];
+      $line_item_form_element = $form[$checkout_pane['pane_id']]['extra_line_items'][$parent_line_item_id]['line_items'][$i];
+      // Remove line item field values the user didn't have access to modify.
+      foreach ($line_item_field_values as $field_name => $value) {
+        // Note that we're checking the Commerce Cart settings that we
+        // inserted into this form element array back when we built the form.
+        // This means a module wanting to alter a line item field widget to be
+        // available must update both its form element's #access value and the
+        // field_access value of the #commerce_cart_settings array.
+        if (empty($line_item_form_element[$field_name]['#commerce_cart_settings']['field_access'])) {
+          unset($line_item_field_values[$field_name]);
         }
-        // Unset the line item field values array if it is now empty.
-        if (!empty($line_item_field_values)) {
-          $line_item = commerce_line_item_load($line_item_id);
-          // Add field data to the line item.
-          field_attach_submit('commerce_line_item', $line_item, $line_item_form_element, $form_state);
-          commerce_line_item_save($line_item);
-        }
+      }
+      // Unset the line item field values array if it is now empty.
+      if (!empty($line_item_field_values)) {
+        $line_item = commerce_line_item_load($line_item_id);
+        // Add field data to the line item.
+        field_attach_submit('commerce_line_item', $line_item, $line_item_form_element, $form_state);
+        commerce_line_item_save($line_item);
       }
     }
   }
