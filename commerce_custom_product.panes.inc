@@ -8,7 +8,7 @@
  * Commerce checkout method callback for CALLBACK_settings_form().
  */
 function commerce_custom_product_customizing_pane_settings_form($checkout_pane) {
-  return array(
+  $form = array(
     'commerce_custom_product_customizing_pane_description' => array(
       '#type' => 'textarea',
       '#title' => t('Description'),
@@ -27,6 +27,46 @@ function commerce_custom_product_customizing_pane_settings_form($checkout_pane) 
       '#default_value' => variable_get('commerce_custom_product_customizing_skip', TRUE),
     ),
   );
+
+  // Build an options array of Views available for the cart contents pane.
+  $options = array();
+
+  // Generate an option list from all user defined and module defined Views,
+  // excluding the core Commerce cart block / form and order listing Views.
+  $exclude = array(
+    'commerce_cart_block',
+    'commerce_cart_form',
+    'commerce_orders',
+    'commerce_user_orders',
+  );
+  $default = variable_get('commerce_custom_product_contents_pane_view', 'commerce_customizing_summary|default');
+
+  foreach (views_get_all_views() as $view_id => $view_value) {
+    // Only include line item Views, including a View that may be excluded but
+    // has already been set to be the selected View some other way. The list of
+    // excluded Views was added in as of Commerce 1.5, so we want to preserve
+    // existing selections much like we do for Price fields with currency select
+    // lists whose currency may have been disabled since the price was entered.
+    if ($view_value->base_table == 'commerce_order') {
+      foreach ($view_value->display as $display_id => $display_value) {
+        $key = $view_id . '|' . $display_id;
+
+        if (!in_array($view_id, $exclude) || $key == $default) {
+          $options[$view_id][$view_id . '|' . $display_id] = $display_value->display_title;
+        }
+      }
+    }
+  }
+
+  $form['commerce_custom_product_contents_pane_view'] = array(
+    '#type' => 'select',
+    '#title' => t('Customizing Review View'),
+    '#description' => t('Specify the View to use in review. It should not include line item summary links or any Views form elements (e.g. quantity textfiedls or delete buttons).') . '<br />' . t('You are not allowed to use any default Views defined by core Commerce modules except the Customizing summary View.'),
+    '#options' => $options,
+    '#default_value' => $default,
+  );
+
+  return $form;
 }
 
 /**
@@ -56,17 +96,12 @@ function commerce_custom_product_customizing_pane_checkout_form($form, &$form_st
     );
 
     foreach ($data['extra_line_items'] as $i => $extra_line_item) {
-      if (!$i && isset($extra_line_item->data['context']['commerce_custom_product'])) {
-        $customizing_context = $extra_line_item->data['context']['commerce_custom_product'];
-        $settings_entity = entity_load_single($customizing_context['settings_entity']['entity_type'], $customizing_context['settings_entity']['id']);
-        $customizing_types = field_get_items($customizing_context['settings_entity']['entity_type'], $settings_entity, $customizing_context['settings']['extra_line_items_field']);
-        if (isset($customizing_types[$customizing_context['delta']])) {
-          if (!empty($customizing_types[$customizing_context['delta']]['label'])) {
-            $form['extra_line_items'][$parent_line_item_id]['#title'] .= '<p class="customizing-label">' . check_plain($customizing_types[$customizing_context['delta']]['label']) . '</p>';
-          }
-          if (!empty($customizing_types[$customizing_context['delta']]['description'])) {
-            $form['extra_line_items'][$parent_line_item_id]['#description'] = filter_xss($customizing_types[$customizing_context['delta']]['description']);
-          }
+      if (!$i && ($customizing_settings = commerce_custom_product_get_customizing_settings_from_line_item($extra_line_item))) {
+        if (!empty($customizing_settings['label'])) {
+          $form['extra_line_items'][$parent_line_item_id]['#title'] .= '<p class="customizing-label">' . check_plain($customizing_settings['label']) . '</p>';
+        }
+        if (!empty($customizing_settings['description'])) {
+          $form['extra_line_items'][$parent_line_item_id]['#description'] = filter_xss($customizing_settings['description']);
         }
       }
 
@@ -118,7 +153,7 @@ function commerce_custom_product_customizing_pane_checkout_form_update($form, &$
  */
 function commerce_custom_product_customizing_pane_checkout_form_submit($form, &$form_state, $checkout_pane, $order) {
   foreach ($form_state['values']['extra_line_items'] as $parent_line_item_id => $extra_line_items) {
-    foreach ($extra_line_items['line_items'] as  $i => $line_item_field_values) {
+    foreach ($extra_line_items['line_items'] as $i => $line_item_field_values) {
       $line_item_id = $line_item_field_values['line_item_id'];
       $line_item_form_element = $form[$checkout_pane['pane_id']]['extra_line_items'][$parent_line_item_id]['line_items'][$i];
       // Remove line item field values the user didn't have access to modify.
@@ -141,4 +176,16 @@ function commerce_custom_product_customizing_pane_checkout_form_submit($form, &$
       }
     }
   }
+}
+
+/**
+ * The customizing review pane.
+ */
+function commerce_custom_product_customizing_pane_review($form, $form_state, $checkout_pane, $order) {
+  drupal_add_css(drupal_get_path('module', 'commerce_custom_product') . '/theme/commerce_custom_product.theme.css');
+
+  // Extract the View and display keys from the cart contents pane setting.
+  list($view_id, $display_id) = explode('|', variable_get('commerce_custom_product_contents_pane_view', 'commerce_customizing_summary|default'));
+
+  return commerce_embed_view($view_id, $display_id, array($order->order_id));
 }

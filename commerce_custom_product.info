@@ -8,3 +8,7 @@ dependencies[] = commerce_product
 dependencies[] = commerce_product_reference
 dependencies[] = entityreference
 core = 7.x
+
+; Views Handlers
+files[] = includes/views/handlers/commerce_custom_product_handler_sort_product_customization.inc
+files[] = includes/views/handlers/commerce_custom_product_handler_field_product_customization_description.inc

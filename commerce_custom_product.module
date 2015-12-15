@@ -91,6 +91,30 @@ function commerce_custom_product_help($path, $arg) {
 }
 
 /**
+ * Implements hook_entity_info_alter().
+ *
+ * Adds the customizing review view mode to the commerce line item entity type.
+ */
+function commerce_custom_product_entity_info_alter(&$entity_info) {
+  if (isset($entity_info['commerce_line_item']['view modes'])) {
+    $entity_info['commerce_line_item']['view modes']['customizing_review'] = array(
+      'label' => t('Customizing Review'),
+      'custom settings' => TRUE,
+    );
+  }
+}
+
+/**
+ * Implements hook_views_api().
+ */
+function commerce_custom_product_views_api() {
+  return array(
+    'api' => 3,
+    'path' => drupal_get_path('module', 'commerce_custom_product') . '/includes/views',
+  );
+}
+
+/**
  * Implements hook_commerce_line_item_type_info().
  */
 function commerce_custom_product_commerce_line_item_type_info() {
@@ -515,6 +539,35 @@ function commerce_custom_product_commerce_cart_order_refresh($order_wrapper) {
 }
 
 /**
+ * Returns a boolean that indicates if this order has customized products.
+ *
+ * @param object $order
+ *   The commerce order to check for customized products.
+ *
+ * @return bool
+ *   Keyed by the parent line item id.
+ */
+function commerce_custom_product_order_has_customized_products($order = NULL) {
+  if (empty($order)) {
+    $order = commerce_cart_order_load($GLOBALS['user']->uid);
+  }
+  // Check if we have an usable order.
+  if (!$order) {
+    return FALSE;
+  }
+  $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  // Collect all the extra line items and group them by parent line item and
+  // type delta.
+  /** @var EntityDrupalWrapper $line_item */
+  foreach ($order_wrapper->commerce_line_items as $line_item) {
+    if (isset($line_item->commerce_parent_line_item) && !is_null($line_item->commerce_parent_line_item->value())) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/**
  * Returns a list of existing extra line items in an order.
  *
  * Takes care to bundle the fields of the same type delta.
@@ -548,35 +601,76 @@ function commerce_custom_product_order_get_existing_extra_line_items($order = NU
         );
       }
       $line_item_raw = $line_item->value();
-      $type_delta = (isset($line_item_raw->data['context']['commerce_custom_product']['delta'])) ? $line_item_raw->data['context']['commerce_custom_product']['delta'] : 0;
-      // Prepare array structure.
-      if (!isset($extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][$type_delta])) {
-        $extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][$type_delta] = array();
-      }
-      // Shortcut to keep the code somewhat readable below.
-      $type_delta_line_items = &$extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][$type_delta];
-
-      // Try to use extra_line_item_index to order extra line items.
-      if (isset($line_item_raw->data['context']['extra_line_item_index']) && !isset($type_delta_line_items[$line_item_raw->data['context']['extra_line_item_index']])) {
-        $type_delta_line_items[$line_item_raw->data['context']['extra_line_item_index']] = $line_item_raw;
-      }
-      else {
-        $type_delta_line_items[] = $line_item_raw;
-      }
+      $extra_line_items[$line_item->commerce_parent_line_item->raw()]['extra_line_items'][] = $line_item_raw;
     }
   }
   // Now do all the sorting for the found extra line items.
   foreach ($extra_line_items as $parent_line_item_id => $extra_line_item_data) {
-    $parent_line_item_extra_line_items = array();
-    ksort($extra_line_item_data['extra_line_items']);
-    foreach ($extra_line_item_data['extra_line_items'] as $type_delta => $type_extra_line_items) {
-      ksort($type_extra_line_items);
-      $parent_line_item_extra_line_items = array_merge($parent_line_item_extra_line_items, array_values($type_extra_line_items));
-    }
     // Set the sorted and reduced array as result.
-    $extra_line_items[$parent_line_item_id]['extra_line_items'] = $parent_line_item_extra_line_items;
+    $extra_line_items[$parent_line_item_id]['extra_line_items'] = array_values(commerce_custom_product_order_sort_existing_extra_line_items($extra_line_items[$parent_line_item_id]['extra_line_items']));
   }
   return $extra_line_items;
+}
+
+/**
+ * Orders an array of extra line items accoring to their delta type and weight.
+ *
+ * @param array $extra_line_items
+ *   List of extra line item objects.
+ *
+ * @return array
+ *   Ordered list of extra line item objects.
+ */
+function commerce_custom_product_order_sort_existing_extra_line_items($extra_line_items) {
+  // Use custom sorting callback to order line items.
+  uasort($extra_line_items, function($a, $b){
+    if (!isset($a->data['context']['commerce_custom_product']['delta'])) {
+      return -1;
+    }
+    if (!isset($b->data['context']['commerce_custom_product']['delta'])) {
+      return 1;
+    }
+    // If we're in the same type delta order the extra line items by their
+    // order. Otherwise we'll pass this and order by type delta. That way the
+    // extra line items are grouped by customizing type.
+    if ($a->data['context']['commerce_custom_product']['delta'] == $b->data['context']['commerce_custom_product']['delta']) {
+      if (!isset($a->data['context']['extra_line_item_index']) || !isset($a->data['context']['extra_line_item_index'])) {
+        return 0;
+      }
+      return ($a->data['context']['extra_line_item_index'] < $b->data['context']['extra_line_item_index']) ? -1 : 1;
+    }
+    return ($a->data['context']['commerce_custom_product']['delta'] < $b->data['context']['commerce_custom_product']['delta']) ? -1 : 1;
+  });
+  return $extra_line_items;
+}
+
+/**
+ * Returns the customizing settings for a extra line item..
+ *
+ * @param object $extra_line_item
+ *   An extra line item object.
+ *
+ * @return array|FALSE
+ *   Customizing settings for this extra line item. FALSE if no settings were
+ *   found.
+ */
+function commerce_custom_product_get_customizing_settings_from_line_item($extra_line_item) {
+  // Check if the extra line item has a custom product context.
+  if (isset($extra_line_item->data['context']['commerce_custom_product'])) {
+    // Use the context to load the customizing settings.
+    $customizing_context = $extra_line_item->data['context']['commerce_custom_product'];
+    $settings_entity = entity_load_single($customizing_context['settings_entity']['entity_type'], $customizing_context['settings_entity']['id']);
+    // Fetch the configuration from the related field.
+    $customizing_types = field_get_items($customizing_context['settings_entity']['entity_type'], $settings_entity, $customizing_context['settings']['extra_line_items_field']);
+    // If the delta exits return the configuration. Other
+    if (isset($customizing_types[$customizing_context['delta']])) {
+      $customizing_settings = $customizing_types[$customizing_context['delta']];
+      // Add the delta to keep track of the "type".
+      $customizing_settings['delta'] = $customizing_context['delta'];
+      return $customizing_settings;
+    }
+  }
+  return FALSE;
 }
 
 /**
@@ -1164,5 +1258,16 @@ function commerce_custom_product_commerce_checkout_router($order, $checkout_page
   if ($checkout_page['page_id'] == 'customizing' && variable_get('commerce_custom_product_customizing_skip', TRUE) && !commerce_custom_product_order_get_existing_extra_line_items($order)) {
     $order = commerce_order_status_update($order, 'checkout_' . $checkout_page['next_page'], FALSE, NULL, t('Customer was redirected to next page since there are no products to customize.'));
     drupal_goto('checkout/' . $order->order_id . '/' . $checkout_page['next_page']);
+  }
+}
+
+/**
+ * Special handling for the customizing_review view mode of extra line item.
+ */
+function commerce_custom_product_preprocess_entity(&$vars) {
+  // Hide the title of customizing line items in the reviewing view mode.
+  if ($vars['view_mode'] == 'customizing_review' && isset($vars['commerce_line_item']->data['context']['commerce_custom_product'])) {
+    // This hides the title - even though it could have some other sideeffects
+    $vars['page'] = TRUE;
   }
 }

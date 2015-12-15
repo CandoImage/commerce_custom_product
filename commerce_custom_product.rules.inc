@@ -27,6 +27,5 @@ function commerce_custom_product_rules_condition_info() {
  * Condition callback: checks if an order contains customizable products.
  */
 function commerce_custom_product_rules_order_contains_customizable_products($order) {
-  $extra_line_items = commerce_custom_product_order_get_existing_extra_line_items($order);
-  return !empty($extra_line_items);
+  return commerce_custom_product_order_has_customized_products($order);
 }
